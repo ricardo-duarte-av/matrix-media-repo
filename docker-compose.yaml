@@ -1,0 +1,75 @@
+# Sample docker-compose for matrix-media-repo (MMR).
+#
+# This is a starting point, not a turn-key production setup. Before it works you MUST edit
+# the generated config (see the "First run" notes at the bottom).
+#
+# Quick start:
+#   1. docker compose up -d postgres
+#   2. docker compose up mediarepo        # first run copies the sample config into ./data, then exits/serves
+#   3. Edit ./data/media-repo.yaml (see notes below), then: docker compose up -d
+#
+# The image below is the one this repo's CI publishes. Swap it for the upstream
+# ghcr.io/t2bot/matrix-media-repo image if you prefer official builds.
+
+services:
+  mediarepo:
+    image: ghcr.io/ricardo-duarte-av/matrix-media-repo:latest
+    # To build locally from this checkout instead of pulling, comment out `image:` above
+    # and uncomment:
+    # build:
+    #   context: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      # host:container — MMR serves on 8000 inside the container.
+      - "8000:8000"
+    environment:
+      # The container runs MMR as this uid/gid and chowns /data to match.
+      UID: "1000"
+      GID: "1000"
+      REPO_CONFIG: /data/media-repo.yaml
+    volumes:
+      # Config lives here. On first start, media-repo.yaml is created from the bundled sample.
+      - ./data:/data
+      # File datastore. Must match the `path:` of your `type: file` datastore in media-repo.yaml
+      # (the sample uses /var/matrix/media).
+      - ./media:/var/matrix/media
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mediarepo
+      POSTGRES_PASSWORD: change_me_please
+      POSTGRES_DB: mediarepo
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mediarepo -d mediarepo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:
+
+# ---------------------------------------------------------------------------
+# First run: after ./data/media-repo.yaml is generated, edit it before MMR will work:
+#
+#   * general.bindAddress: set to '0.0.0.0' (the sample defaults to 127.0.0.1, which is
+#     only reachable from inside the container and will make the published port unusable).
+#
+#   * database.postgres: point it at the postgres service, e.g.
+#       postgres://mediarepo:change_me_please@postgres/mediarepo?sslmode=disable
+#     (host is the compose service name `postgres`; match the password you set above).
+#
+#   * datastores: give the `type: file` datastore a unique `id`, set forKinds to include the
+#     kinds you want stored on disk (e.g. ["thumbnails","remote_media","local_media","archives"]),
+#     and set opts.path to /var/matrix/media to match the volume above. Remove the sample `s3`
+#     datastore unless you actually use S3.
+#
+# Then run `docker compose up -d`. MMR is a media proxy for a Matrix homeserver — you still need
+# to point your homeserver's media endpoints at it. See the repo docs for reverse-proxy setup.
+# ---------------------------------------------------------------------------

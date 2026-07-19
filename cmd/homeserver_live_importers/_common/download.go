@@ -52,12 +52,18 @@ func PsqlMatrixDownloadCopy[M homeserver_interop.ImportDbMedia](ctx rcontext.Req
 	}
 
 	numCompleted := 0
+	numFailed := 0
 	mu := &sync.RWMutex{}
 	onComplete := func() {
 		mu.Lock()
 		numCompleted++
 		percent := int((float32(numCompleted) / float32(len(records))) * 100)
-		ctx.Log.Info(fmt.Sprintf("%d/%d downloaded (%d%%)", numCompleted, len(records), percent))
+		ctx.Log.Info(fmt.Sprintf("%d/%d processed (%d%%)", numCompleted, len(records), percent))
+		mu.Unlock()
+	}
+	onFail := func() {
+		mu.Lock()
+		numFailed++
 		mu.Unlock()
 	}
 
@@ -71,21 +77,31 @@ func PsqlMatrixDownloadCopy[M homeserver_interop.ImportDbMedia](ctx rcontext.Req
 		}
 
 		ctx.Log.Debug(fmt.Sprintf("Queuing %s (%d/%d %d%%)", meta.MediaId, i+1, len(records), percent))
-		err = pool.Submit(doWork(ctx, meta, cfg.ServerName, cfg.ApiUrl, onComplete))
+		err = pool.Submit(doWork(ctx, meta, cfg.ServerName, cfg.ApiUrl, cfg.AccessToken, onComplete, onFail))
 		if err != nil {
 			panic(err)
 		}
 	}
 
-	for numCompleted < len(records) {
+	for {
+		mu.RLock()
+		done := numCompleted
+		mu.RUnlock()
+		if done >= len(records) {
+			break
+		}
 		ctx.Log.Debug("Waiting for import to complete...")
 		time.Sleep(1 * time.Second)
 	}
 
-	ctx.Log.Info("Import completed")
+	if numFailed > 0 {
+		ctx.Log.Warnf("Import completed with %d/%d records failed (see warnings above). Re-running will retry only the failed/missing media.", numFailed, len(records))
+	} else {
+		ctx.Log.Info("Import completed")
+	}
 }
 
-func doWork(ctx rcontext.RequestContext, record *MediaMetadata, serverName string, csApiUrl string, onComplete func()) func() {
+func doWork(ctx rcontext.RequestContext, record *MediaMetadata, serverName string, csApiUrl string, accessToken string, onComplete func(), onFail func()) func() {
 	return func() {
 		defer onComplete()
 
@@ -95,21 +111,25 @@ func doWork(ctx rcontext.RequestContext, record *MediaMetadata, serverName strin
 
 		dbRecord, err := db.GetById(serverName, record.MediaId)
 		if err != nil {
-			panic(err)
+			panic(err) // a failure to read our own database is systemic, not per-item
 		}
 		if dbRecord != nil {
 			ctx.Log.Debug("Already downloaded - skipping")
 			return
 		}
 
-		body, err := downloadMedia(csApiUrl, serverName, record.MediaId)
+		body, err := downloadMedia(csApiUrl, serverName, record.MediaId, accessToken)
 		if err != nil {
-			panic(err)
+			ctx.Log.Warnf("Failed to download - skipping: %v", err)
+			onFail()
+			return
 		}
 
 		dbRecord, err = pipeline_upload.Execute(ctx, serverName, record.MediaId, body, record.ContentType, record.FileName, record.UploaderUserId, datastores.LocalMediaKind)
 		if err != nil {
-			panic(err)
+			ctx.Log.Warnf("Failed to import - skipping: %v", err)
+			onFail()
+			return
 		}
 
 		if dbRecord.SizeBytes != record.SizeBytes {
@@ -118,13 +138,30 @@ func doWork(ctx rcontext.RequestContext, record *MediaMetadata, serverName strin
 	}
 }
 
-func downloadMedia(baseUrl string, serverName string, mediaId string) (io.ReadCloser, error) {
-	downloadUrl := baseUrl + "/_matrix/media/v3/download/" + serverName + "/" + mediaId
-	resp, err := http.Get(downloadUrl)
+func downloadMedia(baseUrl string, serverName string, mediaId string, accessToken string) (io.ReadCloser, error) {
+	var downloadUrl string
+	if accessToken != "" {
+		// Authenticated media (MSC3916): requires any valid access token. Encrypted (E2EE)
+		// media is served the same way - as an opaque blob - so no special handling is needed.
+		downloadUrl = baseUrl + "/_matrix/client/v1/media/download/" + serverName + "/" + mediaId
+	} else {
+		downloadUrl = baseUrl + "/_matrix/media/v3/download/" + serverName + "/" + mediaId
+	}
+
+	req, err := http.NewRequest(http.MethodGet, downloadUrl, nil)
+	if err != nil {
+		return nil, err
+	}
+	if accessToken != "" {
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
 		return nil, errors.New("received status code " + strconv.Itoa(resp.StatusCode))
 	}
 

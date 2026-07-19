@@ -63,16 +63,27 @@ From source, swap the binary for `go run ./cmd/homeserver_live_importers/import_
 | `-config` | `media-repo.yaml` | Path to MMR config. Overridden by `REPO_CONFIG` env var if set. |
 | `-migrations` | `./migrations` | Path to MMR's migrations folder. |
 | `-workers` | `10` | Concurrent download workers. |
+| `-accessToken` | *(none)* | Access token for any local user. Enables the authenticated media endpoint (see below). Prefer the `MMR_IMPORT_ACCESS_TOKEN` env var to keep it out of your shell history. |
+
+## Authenticated media
+
+Homeservers that enforce authenticated media (MSC3916) reject the legacy unauthenticated
+`/_matrix/media/v3/download` endpoint — you'll see every download fail with `404`. Supply
+`-accessToken` (or `MMR_IMPORT_ACCESS_TOKEN`) and the importer switches to the authenticated
+`/_matrix/client/v1/media/download` endpoint with a `Bearer` token. Any valid access token for a
+**local user** works; it does not need to be an admin.
+
+**End-to-end-encrypted media** needs no special handling: the media API only ever stores/serves the
+encrypted blob (the keys live in the room event), so it is imported like any other file and clients
+continue to decrypt it on view.
 
 ## Caveats & gotchas
 
-- **Authenticated media:** the download uses the legacy *unauthenticated* `/_matrix/media/v3/download`
-  endpoint with no access token. Homeservers that have disabled unauthenticated media access will
-  reject these requests. Run the import before locking media down, or use the offline importer, which
-  reads files from disk instead.
-- **Fail-fast:** any single failed download or DB error aborts the whole run (the tool panics). It is
-  safe to re-run — completed media is skipped — but there is no automatic retry, and a single broken
-  media record will stop the batch until resolved or removed.
+- **Per-item failures are skipped, not fatal.** A media record that fails to download (e.g. `404` for
+  quarantined/deleted content) or import is logged and skipped; the run continues and reports the
+  failure count at the end. Re-running retries only the missing media (already-imported media is
+  skipped), so re-run until the failure count is zero or the remaining failures are understood.
+  A failure to read MMR's *own* database is still treated as fatal.
 - **No download timeout:** a stalled connection to the homeserver can hang a worker indefinitely. If a
   run appears stuck, interrupt and re-run.
 - **`-dbPassword` on the command line** is visible in your shell history and the process list. Prefer

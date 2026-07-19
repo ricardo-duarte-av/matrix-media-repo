@@ -20,6 +20,7 @@ import (
 type ImportOptsPsqlFlatFile struct {
 	ServerName       string
 	ApiUrl           string
+	AccessToken      string
 	NumWorkers       int
 	ConnectionString string
 }
@@ -35,7 +36,13 @@ func InitImportPsqlMatrixDownload(softwareName string) *ImportOptsPsqlFlatFile {
 	configPath := flag.String("config", "media-repo.yaml", "The path to the media repo configuration (configured for the media repo's database).")
 	migrationsPath := flag.String("migrations", "./migrations", "The absolute path the media repo's migrations folder.")
 	numWorkers := flag.Int("workers", 10, "The number of workers to use when downloading media. Using multiple workers is recommended.")
+	accessToken := flag.String("accessToken", "", "Access token for any local user on the homeserver. Required if the homeserver enforces authenticated media - the media is then downloaded via the authenticated /_matrix/client/v1/media endpoint. Can also be supplied via the MMR_IMPORT_ACCESS_TOKEN environment variable to keep it out of your shell history and the process list.")
 	flag.Parse()
+
+	realAccessToken := *accessToken
+	if realAccessToken == "" {
+		realAccessToken = os.Getenv("MMR_IMPORT_ACCESS_TOKEN")
+	}
 
 	// Override config path with config for Docker users
 	configEnv := os.Getenv("REPO_CONFIG")
@@ -93,6 +100,7 @@ func InitImportPsqlMatrixDownload(softwareName string) *ImportOptsPsqlFlatFile {
 	return &ImportOptsPsqlFlatFile{
 		ServerName:       *serverName,
 		ApiUrl:           csApiUrl,
+		AccessToken:      realAccessToken,
 		NumWorkers:       *numWorkers,
 		ConnectionString: connectionString,
 	}

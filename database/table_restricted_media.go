@@ -76,12 +76,16 @@ func (s *restrictedMediaTableWithContext) GetAllForId(origin string, mediaId str
 		}
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		val := &DbRestrictedMedia{}
 		if err = rows.Scan(&val.Origin, &val.MediaId, &val.Condition, &val.ConditionValue); err != nil {
 			return nil, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

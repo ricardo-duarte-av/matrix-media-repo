@@ -69,12 +69,16 @@ func (s *exportPartsTableWithContext) GetForExport(exportId string) ([]*DbExport
 		}
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		val := &DbExportPart{}
 		if err = rows.Scan(&val.ExportId, &val.PartNum, &val.SizeBytes, &val.FileName, &val.DatastoreId, &val.Location); err != nil {
 			return nil, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

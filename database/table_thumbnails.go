@@ -108,12 +108,16 @@ func (s *thumbnailsTableWithContext) scanRows(rows *sql.Rows, err error) ([]*DbT
 		}
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		val := &DbThumbnail{Locatable: &Locatable{}}
 		if err = rows.Scan(&val.Origin, &val.MediaId, &val.ContentType, &val.Width, &val.Height, &val.Method, &val.Animated, &val.Sha256Hash, &val.SizeBytes, &val.CreationTs, &val.DatastoreId, &val.Location); err != nil {
 			return nil, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return results, nil

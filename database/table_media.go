@@ -162,6 +162,7 @@ func (s *MediaTableWithContext) GetDistinctDatastoreIds() ([]string, error) {
 		}
 		return nil, err
 	}
+	defer rows.Close()
 
 	for rows.Next() {
 		val := ""
@@ -169,6 +170,9 @@ func (s *MediaTableWithContext) GetDistinctDatastoreIds() ([]string, error) {
 			return nil, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return results, nil
@@ -194,12 +198,16 @@ func (s *MediaTableWithContext) scanRows(rows *sql.Rows, err error) ([]*DbMedia,
 		}
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		val := &DbMedia{Locatable: &Locatable{}}
 		if err = rows.Scan(&val.Origin, &val.MediaId, &val.UploadName, &val.ContentType, &val.UserId, &val.Sha256Hash, &val.SizeBytes, &val.CreationTs, &val.Quarantined, &val.DatastoreId, &val.Location); err != nil {
 			return nil, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return results, nil

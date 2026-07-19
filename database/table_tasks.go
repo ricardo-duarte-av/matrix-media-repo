@@ -114,12 +114,16 @@ func (s *tasksTableWithContext) GetAll(includingFinished bool) ([]*DbTask, error
 		}
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		val := &DbTask{}
 		if err = rows.Scan(&val.TaskId, &val.Name, &val.Params, &val.StartTs, &val.EndTs, &val.Error); err != nil {
 			return nil, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 	return results, nil
 }

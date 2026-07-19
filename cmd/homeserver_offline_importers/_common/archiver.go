@@ -32,7 +32,7 @@ func PsqlFlatFileArchive[M homeserver_interop.ImportDbMedia](ctx rcontext.Reques
 		if err != nil {
 			if os.IsNotExist(err) && cfg.SkipMissing {
 				missing = append(missing, info.FileName)
-				return
+				continue
 			}
 			ctx.Log.Fatal(err)
 		}

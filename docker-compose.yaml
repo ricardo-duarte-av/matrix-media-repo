@@ -22,6 +22,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      valkey:
+        condition: service_healthy
     ports:
       # host:container — MMR serves on 8000 inside the container.
       - "8000:8000"
@@ -38,7 +40,7 @@ services:
       - ./media:/var/matrix/media
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: mediarepo
@@ -52,8 +54,23 @@ services:
       timeout: 5s
       retries: 10
 
+  # Valkey is a drop-in Redis replacement, used by MMR as its cache backend.
+  # Redis/Valkey is optional — enable it in media-repo.yaml (see notes below).
+  valkey:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    volumes:
+      - valkeydata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
 volumes:
   pgdata:
+  valkeydata:
 
 # ---------------------------------------------------------------------------
 # First run: after ./data/media-repo.yaml is generated, edit it before MMR will work:
@@ -69,6 +86,17 @@ volumes:
 #     kinds you want stored on disk (e.g. ["thumbnails","remote_media","local_media","archives"]),
 #     and set opts.path to /var/matrix/media to match the volume above. Remove the sample `s3`
 #     datastore unless you actually use S3.
+#
+#   * redis (optional, but the valkey service above is wired up for it): to use Valkey as the
+#     cache backend, set redis.enabled: true and replace the sample shards with a single shard
+#     pointing at the valkey service:
+#       redis:
+#         enabled: true
+#         shards:
+#           - name: "valkey"
+#             addr: "valkey:6379"
+#     Leave redis.enabled: false to use MMR's built-in in-process cache instead (the valkey
+#     container will simply go unused — remove it (and its depends_on entry above) if so).
 #
 # Then run `docker compose up -d`. MMR is a media proxy for a Matrix homeserver — you still need
 # to point your homeserver's media endpoints at it. See the repo docs for reverse-proxy setup.

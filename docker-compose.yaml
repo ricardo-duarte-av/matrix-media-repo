@@ -60,7 +60,19 @@ services:
   valkey:
     image: valkey/valkey:8-alpine
     restart: unless-stopped
-    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    # maxmemory + LRU eviction bound RAM usage. Without a cap, MMR caches every uploaded blob
+    # (e.g. during a bulk import) and Valkey grows until it OOMs the host. Evictions are harmless:
+    # MMR just re-reads from the datastore on a cache miss. Tune 2gb to fit your host.
+    command:
+      - valkey-server
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --maxmemory
+      - 2gb
+      - --maxmemory-policy
+      - allkeys-lru
     volumes:
       - valkeydata:/data
     healthcheck:

@@ -5,14 +5,55 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/getsentry/sentry-go"
 	"github.com/t2bot/matrix-media-repo/common/rcontext"
 )
+
+// idleClosingTransport wraps an *http.Transport so that its idle connections are
+// released as soon as the response body is closed (or immediately on a transport
+// error). Every call to NewHttpClient builds a throwaway transport - without this,
+// its keep-alive connections (and their reader/writer goroutines + file descriptors)
+// would linger for IdleConnTimeout, and any response body that isn't closed would pin
+// them forever. See matrix/http.go history and the download pipeline for context.
+type idleClosingTransport struct {
+	inner *http.Transport
+}
+
+func (t *idleClosingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.inner.RoundTrip(req)
+	if err != nil {
+		t.inner.CloseIdleConnections()
+		return resp, err
+	}
+	if resp != nil && resp.Body != nil {
+		resp.Body = &idleClosingBody{ReadCloser: resp.Body, transport: t.inner}
+	}
+	return resp, nil
+}
+
+// CloseIdleConnections lets http.Client.CloseIdleConnections() reach the inner transport.
+func (t *idleClosingTransport) CloseIdleConnections() {
+	t.inner.CloseIdleConnections()
+}
+
+type idleClosingBody struct {
+	io.ReadCloser
+	transport *http.Transport
+	once      sync.Once
+}
+
+func (b *idleClosingBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(b.transport.CloseIdleConnections)
+	return err
+}
 
 type HttpClientConfig struct {
 	Timeout                time.Duration
@@ -50,6 +91,7 @@ func NewHttpClient(ctx rcontext.RequestContext, clientConfig *HttpClientConfig) 
 		Proxy:                 http.ProxyFromEnvironment, // default
 		ForceAttemptHTTP2:     true,                      // default
 		MaxIdleConns:          100,                       // default
+		MaxIdleConnsPerHost:   4,                         // bound per-host idle sockets (default is only 2, but be explicit)
 		IdleConnTimeout:       90 * time.Second,          // default
 		TLSHandshakeTimeout:   10 * time.Second,          // default
 		ExpectContinueTimeout: 1 * time.Second,           // default
@@ -84,7 +126,7 @@ func NewHttpClient(ctx rcontext.RequestContext, clientConfig *HttpClientConfig) 
 	// We also remove the server name check from our federation requests once redirected because they're
 	// likely to fail.
 	safeClient := &http.Client{
-		Transport: safeTransport,
+		Transport: &idleClosingTransport{inner: safeTransport},
 		Timeout:   clientConfig.Timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if !clientConfig.FollowRedirects {

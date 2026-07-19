@@ -64,7 +64,12 @@ func noRelayNotifyUpload(record *database.DbMedia) {
 
 		if arr, ok := localUploadWaiters[mxc]; ok {
 			for _, ch := range arr {
-				ch <- record
+				// Non-blocking: waiter channels are buffered(1) and consumed once, so
+				// never block here while holding uploadMutex if one is already satisfied.
+				select {
+				case ch <- record:
+				default:
+				}
 			}
 			delete(localUploadWaiters, mxc)
 		}
@@ -84,8 +89,10 @@ func subscribeRedisUploads() {
 		return // no redis to subscribe with
 	}
 	go func() {
-		for {
-			val := <-uploadsRedisChan
+		// Ranging exits when the subscription channel is closed (redis Stop) rather
+		// than busy-looping on a closed channel. A Reconnect keeps this channel open
+		// and re-attaches the producer, so the loop simply keeps receiving.
+		for val := range uploadsRedisChan {
 			logrus.Debug("Received value from uploads notify channel: ", val)
 
 			origin, mediaId, err := util.SplitMxc(val)
@@ -107,5 +114,10 @@ func subscribeRedisUploads() {
 
 			noRelayNotifyUpload(record)
 		}
+
+		// Channel closed (redis stopped) - allow a future call to re-subscribe.
+		uploadMutex.Lock()
+		uploadsRedisChan = nil
+		uploadMutex.Unlock()
 	}()
 }

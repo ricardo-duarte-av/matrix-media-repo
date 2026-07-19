@@ -42,13 +42,25 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 		return nil, nil, common.ErrMediaNotFound
 	}
 
-	ch := make(chan downloadResult)
-	defer close(ch)
+	// Buffered by one so the worker's single send never blocks - even if the caller
+	// stopped reading because its context was cancelled. This lets the worker finish
+	// and return promptly instead of being pinned forever on the send.
+	ch := make(chan downloadResult, 1)
 	fn := func() {
 		cacheKey := fmt.Sprintf("%s/%s", origin, mediaId)
 		if err := errcache.DownloadErrors.Get(cacheKey); err != nil {
 			ch <- downloadResult{err: err}
 			return
+		}
+
+		// closeBody releases a response's connection on error/abort paths. On the
+		// success path the body is instead handed off to the caller (see the final
+		// `ch <-` send) and closed downstream. Not closing here leaks the underlying
+		// connection (and its goroutines/file descriptors) toward this specific origin.
+		closeBody := func(r *http.Response) {
+			if r != nil && r.Body != nil {
+				_ = r.Body.Close()
+			}
 		}
 
 		errFn := func(err error) {
@@ -74,6 +86,7 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 				return
 			}
 			if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
+				closeBody(resp)
 				errFn(matrix.MakeServerNotAllowedError(ctx.Request.Host))
 				return
 			} else if resp.StatusCode == http.StatusNotFound {
@@ -111,9 +124,11 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 		}
 
 		if resp.StatusCode == http.StatusNotFound {
+			closeBody(resp)
 			errFn(common.ErrMediaNotFound)
 			return
 		} else if resp.StatusCode != http.StatusOK {
+			closeBody(resp)
 			errFn(errors.New(fmt.Sprintf("unexpected status code %d", resp.StatusCode)))
 			return
 		}
@@ -122,12 +137,14 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 		if resp.Header.Get("Content-Length") != "" {
 			contentLength, err = strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
 			if err != nil {
+				closeBody(resp)
 				errFn(err)
 				return
 			}
 		}
 
 		if contentLength != 0 && ctx.Config.Downloads.MaxSizeBytes > 0 && contentLength > ctx.Config.Downloads.MaxSizeBytes {
+			closeBody(resp)
 			errFn(common.ErrMediaTooLarge)
 			return
 		}
@@ -141,13 +158,19 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 		metadata := &database.AnonymousJson{}
 		mediaPart := util.MatrixMediaPartFromResponse(resp)
 		if usesMultipartFormat {
+			// Closing a multipart part does not close the underlying response
+			// connection, so we hold onto the response here to close it explicitly.
+			multipartResp := resp
+
 			if !strings.HasPrefix(contentType, "multipart/mixed;") {
+				closeBody(multipartResp)
 				errFn(fmt.Errorf("expected multipart/mixed, got %s", contentType))
 				return
 			}
 
 			_, params, err := mime.ParseMediaType(contentType)
 			if err != nil {
+				closeBody(multipartResp)
 				errFn(err)
 				return
 			}
@@ -157,6 +180,7 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 			// The first part should always be the metadata
 			jsonPart, err := partReader.NextPart()
 			if err != nil {
+				closeBody(multipartResp)
 				errFn(err)
 				return
 			}
@@ -165,10 +189,12 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 				decoder := json.NewDecoder(jsonPart)
 				err = decoder.Decode(&metadata)
 				if err != nil {
+					closeBody(multipartResp)
 					errFn(err)
 					return
 				}
 			} else {
+				closeBody(multipartResp)
 				errFn(fmt.Errorf("expected application/json as the first part, got %s instead", partType))
 				return
 			}
@@ -178,6 +204,7 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 			// The second part should always be the media itself
 			bodyPart, err := partReader.NextPart()
 			if err != nil {
+				closeBody(multipartResp)
 				errFn(err)
 				return
 			}
@@ -194,6 +221,8 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 					sentry.CaptureException(errors.Join(errors.New("non-fatal error closing redirected MSC3916 body"), err))
 					ctx.Log.Debug("Non-fatal error closing redirected MSC3916 body: ", err)
 				}
+				// We're done with the multipart response - release its connection.
+				closeBody(multipartResp)
 
 				client := matrix.NewHttpClient(ctx, &matrix.HttpClientConfig{
 					Timeout:                time.Duration(ctx.Config.TimeoutSeconds.Federation) * time.Second,
@@ -207,8 +236,15 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 					errFn(err)
 					return
 				}
-				mediaPart = util.MatrixMediaPartFromResponse(resp)
+				mediaPart = util.MatrixMediaPartFromResponse(resp) // Body is resp.Body; closing it releases the connection
 				contentType = mediaPart.Header.Get("Content-Type")
+			} else {
+				// Non-redirect multipart: the handed-off body is the mime part, which
+				// does not close the underlying response. Chain that close onto it so
+				// the connection is released when the caller closes the media stream.
+				mediaPart.Body = readers.NewCancelCloser(mediaPart.Body, func() {
+					closeBody(multipartResp)
+				})
 			}
 		}
 
@@ -234,13 +270,28 @@ func TryDownload(ctx rcontext.RequestContext, origin string, mediaId string) (*d
 	if err := pool.DownloadQueue.Schedule(fn); err != nil {
 		return nil, nil, err
 	}
-	res := <-ch
-	if res.err != nil {
-		return nil, nil, res.err
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return nil, nil, res.err
+		}
+
+		// At this point, res.r is our http response body.
+		// TODO: Do something with res.metadata (MSC3911)
+
+		return datastore_op.PutAndReturnStream(ctx, origin, mediaId, res.r, res.contentType, res.filename, datastores.RemoteMediaKind)
+	case <-ctx.Context.Done():
+		// The caller/pipeline was cancelled (e.g. client disconnected). The worker's
+		// federation request shares this context and will abort shortly; drain its
+		// eventual result in the background and release the body so we don't leak the
+		// connection.
+		go func() {
+			res := <-ch
+			if res.r != nil {
+				_ = res.r.Close()
+			}
+		}()
+		return nil, nil, ctx.Context.Err()
 	}
-
-	// At this point, res.r is our http response body.
-	// TODO: Do something with res.metadata (MSC3911)
-
-	return datastore_op.PutAndReturnStream(ctx, origin, mediaId, res.r, res.contentType, res.filename, datastores.RemoteMediaKind)
 }

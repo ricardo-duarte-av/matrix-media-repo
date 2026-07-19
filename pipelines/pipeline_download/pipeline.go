@@ -109,6 +109,20 @@ func Execute(ctx rcontext.RequestContext, origin string, mediaId string, opts Do
 		}
 	}
 
+	// The MaxSizeBytes reservation above is a worst-case hold that is reconciled to the
+	// real file size on success (see the Drain below). On EVERY other return path -
+	// download failure, quarantine, the "not allowed" retry, etc. - we must give the
+	// whole reservation back. Otherwise a requesting IP that hits repeated download
+	// failures slowly fills its per-IP bucket with phantom bytes (default: 100mb per
+	// failure, draining only 5mb/min) and eventually gets rate-limited on all media -
+	// including media we could serve - while other servers are unaffected. The success
+	// path clears didBucketMaxSize so this safety net does not double-refund.
+	defer func() {
+		if didBucketMaxSize && limitBucket != nil {
+			_ = limitBucket.Drain(ctx.Config.Downloads.MaxSizeBytes)
+		}
+	}()
+
 	r, err, _ := streamSf.Do(sfKey, func() (io.ReadCloser, error) {
 		// Step 3: Do we already have the media? Serve it if yes.
 		if record != nil {
@@ -186,6 +200,8 @@ func Execute(ctx rcontext.RequestContext, origin string, mediaId string, opts Do
 			}
 			return nil, nil, limitErr
 		}
+		// Reservation reconciled to the real size - stop the deferred safety-net refund.
+		didBucketMaxSize = false
 	}
 	if opts.RecordOnly {
 		if r != nil {

@@ -46,15 +46,19 @@ func DownloadRawContent(urlPayload *m.UrlPayload, supportedTypes []string, langu
 		return nil, "", "", err
 	}
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		ctx.Log.Warn("Received status code " + strconv.Itoa(resp.StatusCode))
 		return nil, "", "", errors.New("error during transfer")
 	}
 
 	if ctx.Config.UrlPreviews.MaxPageSizeBytes > 0 && resp.ContentLength >= 0 && resp.ContentLength > ctx.Config.UrlPreviews.MaxPageSizeBytes {
+		resp.Body.Close()
 		return nil, "", "", common.ErrMediaTooLarge
 	}
 
-	var reader io.ReadCloser
+	reader := readers.NewCancelCloser(resp.Body, func() {
+		resp.Body.Close()
+	})
 	if ctx.Config.UrlPreviews.MaxPageSizeBytes > 0 {
 		lr := io.LimitReader(resp.Body, ctx.Config.UrlPreviews.MaxPageSizeBytes)
 		reader = readers.NewCancelCloser(io.NopCloser(lr), func() {
@@ -65,6 +69,7 @@ func DownloadRawContent(urlPayload *m.UrlPayload, supportedTypes []string, langu
 	contentType := resp.Header.Get("Content-Type")
 	for _, supportedType := range supportedTypes {
 		if !glob.Glob(supportedType, contentType) {
+			reader.Close()
 			return nil, "", "", m.ErrPreviewUnsupported
 		}
 	}
@@ -100,6 +105,7 @@ func DownloadImage(urlPayload *m.UrlPayload, languageHeader string, ctx rcontext
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		ctx.Log.Warn("Received status code " + strconv.Itoa(resp.StatusCode))
 		return nil, errors.New("error during transfer")
 	}

@@ -89,7 +89,7 @@ func FederatedGet(ctx rcontext.RequestContext, reqUrl string, realHost string, d
 
 	var resp *http.Response
 	replyError := cb.CallContext(ctx, func() error {
-		req, err := http.NewRequest(http.MethodGet, reqUrl, nil)
+		req, err := http.NewRequestWithContext(ctx.Context, http.MethodGet, reqUrl, nil)
 		if err != nil {
 			return err
 		}
@@ -138,9 +138,14 @@ func FederatedGet(ctx rcontext.RequestContext, reqUrl string, realHost string, d
 			return err
 		}
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+			statusCode := resp.StatusCode
 			b, _ := io.ReadAll(resp.Body)
+			// Close the body here: the caller only handles OK/NotFound responses and
+			// discards the rest on error, so it would otherwise leak this connection.
+			_ = resp.Body.Close()
+			resp = nil
 			ctx.Log.Warn(string(b))
-			return fmt.Errorf("response not ok: %d", resp.StatusCode)
+			return fmt.Errorf("response not ok: %d", statusCode)
 		}
 		return nil
 	}, 1*time.Minute)

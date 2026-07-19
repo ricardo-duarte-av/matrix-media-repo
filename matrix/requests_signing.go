@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"net/http"
-	"sync"
 	"time"
 
 	"github.com/patrickmn/go-cache"
@@ -33,8 +32,12 @@ type ServerKeyResult struct {
 type ServerSigningKeys map[string]ed25519.PublicKey
 
 var signingKeySf = new(typedsf.Group[ServerSigningKeys])
+
+// signingKeyCache is internally synchronized (go-cache), and signingKeySf dedupes
+// concurrent fetches per server, so no additional lock is needed. A previous global
+// RWMutex was held across the network fetch below, which serialized signing-key
+// lookups for every server and let one slow host stall them all.
 var signingKeyCache = cache.New(cache.NoExpiration, 30*time.Second)
-var signingKeyRWLock = new(sync.RWMutex)
 
 // TestsOnlyInjectSigningKey
 // Deprecated: For tests only.
@@ -61,9 +64,7 @@ func TestsOnlyInjectSigningKey(serverName string, httpFederationUrl string) erro
 		return err
 	}
 
-	// Cache & return (unlock is deferred)
-	signingKeyRWLock.Lock()
-	defer signingKeyRWLock.Unlock()
+	// Cache & return
 	cacheUntil := time.Until(time.UnixMilli(keyInfo.ValidUntilTs)) / 2
 	signingKeyCache.Set(serverName, &serverKeys, cacheUntil)
 
@@ -79,9 +80,7 @@ func querySigningKeyCache(serverName string) ServerSigningKeys {
 }
 
 func QuerySigningKeys(serverName string) (ServerSigningKeys, error) {
-	signingKeyRWLock.RLock()
 	keys := querySigningKeyCache(serverName)
-	signingKeyRWLock.RUnlock()
 	if keys != nil {
 		return keys, nil
 	}
@@ -91,12 +90,9 @@ func QuerySigningKeys(serverName string) (ServerSigningKeys, error) {
 			"keysForServer": serverName,
 		})
 
-		signingKeyRWLock.Lock()
-		defer signingKeyRWLock.Unlock()
-
-		// check cache once more, just in case the locks overlapped
+		// check cache once more, in case another call populated it while we waited
 		cachedKeys := querySigningKeyCache(serverName)
-		if keys != nil {
+		if cachedKeys != nil {
 			return cachedKeys, nil
 		}
 

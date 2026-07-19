@@ -92,6 +92,10 @@ func Execute(ctx rcontext.RequestContext, origin string, mediaId string, opts Th
 		cancel()
 		return nil, nil, err
 	}
+	// chargedToBucket records how much we actually added to the bucket so we can refund
+	// exactly that on failure paths (record may be reassigned inside the singleflight
+	// below, so record.SizeBytes is not a safe amount to drain later).
+	chargedToBucket := int64(0)
 	if limitBucket != nil && record != nil && !opts.RecordOnly {
 		if limitErr := limitBucket.Add(record.SizeBytes); limitErr != nil {
 			cancel()
@@ -101,6 +105,7 @@ func Execute(ctx rcontext.RequestContext, origin string, mediaId string, opts Th
 			}
 			return nil, nil, limitErr
 		}
+		chargedToBucket = record.SizeBytes
 	}
 
 	r, err, _ := streamSf.Do(sfKey, func() (io.ReadCloser, error) {
@@ -173,8 +178,8 @@ func Execute(ctx rcontext.RequestContext, origin string, mediaId string, opts Th
 			return nil, readers.NewCancelCloser(r, cancel), err
 		}
 
-		if limitBucket != nil {
-			if limitErr := limitBucket.Drain(record.SizeBytes); limitErr != nil {
+		if limitBucket != nil && chargedToBucket > 0 {
+			if limitErr := limitBucket.Drain(chargedToBucket); limitErr != nil {
 				sentry.CaptureException(limitErr)
 				ctx.Log.Warn("Non-fatal error during bucket drain:", limitErr)
 			}
@@ -184,6 +189,10 @@ func Execute(ctx rcontext.RequestContext, origin string, mediaId string, opts Th
 		return nil, nil, err
 	}
 	if err != nil {
+		// Refund the reservation - we charged for a thumbnail we ultimately didn't serve.
+		if limitBucket != nil && chargedToBucket > 0 {
+			_ = limitBucket.Drain(chargedToBucket)
+		}
 		cancel()
 		return nil, nil, err
 	}

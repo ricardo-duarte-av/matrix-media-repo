@@ -188,6 +188,7 @@ func (s *metadataVirtualTableWithContext) UnoptimizedSynapseUserStatsPage(server
 		}
 		return nil, 0, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		val := &DbSynUserStat{}
 		err = rows.Scan(&val.MediaCount, &val.MediaLength, &val.UserId)
@@ -195,6 +196,9 @@ func (s *metadataVirtualTableWithContext) UnoptimizedSynapseUserStatsPage(server
 			return nil, 0, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, 0, err
 	}
 
 	sqlTotalQ := fmt.Sprintf("SELECT COUNT(*) FROM (SELECT user_id %s) AS count_user_ids;", sqlStart)
@@ -220,12 +224,16 @@ func (s *metadataVirtualTableWithContext) scanLastAccess(rows *sql.Rows, err err
 		}
 		return nil, err
 	}
+	defer rows.Close()
 	for rows.Next() {
 		val := &VirtLastAccess{Locatable: &Locatable{}}
 		if err = rows.Scan(&val.Sha256Hash, &val.SizeBytes, &val.DatastoreId, &val.Location, &val.CreationTs, &val.LastAccessTs, &val.ContentType); err != nil {
 			return nil, err
 		}
 		results = append(results, val)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
 	}
 
 	return results, nil
